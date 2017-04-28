@@ -19,20 +19,51 @@ License: MIT license (see LICENSE file).
 #define WWVB_TIMECODE 1
 #endif
 
-#ifndef WWVB_JJY_PWM
-#define WWVB_JJY_PAM
+#ifndef WWVB_JJY_PAM
+#define WWVB_JJY_PWM
 #endif
 
-#ifdef __AVR_ATtinyX5__
-  #ifdef WWVB_JJY_PAM
-  #undef WWVB_JJY_PAM
-  #endif
+#ifndef WWVB_JJY_PULSE_LED
+#define WWVB_JJY_PULSE_LED 1
 #endif
 
 #include "wwvb_jjy_structs.h"
 #include <Time.h>           //http://www.arduino.cc/playground/Code/Time
 #include <Timezone.h>       //https://github.com/JChristensen/Timezone
 #include <PWM.h>            //https://github.com/micooke/PWM
+
+#if defined(__AVR_ATtinyX5__)
+#define WWVB_JJY_MILLIS_ISR
+#endif
+
+//                 +--------+
+//                 | millis |
+//+------------+---+--------+--------+--------+--------+--------+
+//| Chip       |   | Timer0 | Timer1 | Timer2 | Timer3 | Timer4 |
+//+------------+---+--------+--------+--------+--------+--------+
+//| ATtiny85   | A |   D0   |   D1   |   --   |   --   |   --   |
+//|            | B |   D1   | C=D3   |   --   |   --   |   --   |
+//|       M=D4 (Toggled in software) |   --   |   --   |   --   |
+//+------------+---+--------+--------+--------+--------+--------+
+//| ATmega328p | A |   D6   | M=D9   |  D12   |   --   |   --   |
+//|            | B |   D5   |  D10   | C=D3   |   --   |   --   |
+//+------------+---+--------+--------+--------+--------+--------+
+//| ATmega32u4 | A |  D11   | C=D9   |   --   | M=D5   |  D13   |
+//+------------+---+--------+--------+--------+--------+--------+
+// C = carrier pin
+// M = modulation pin
+
+// set the output pins
+#if defined(__AVR_ATtinyX5__)
+  #define CARRIER_PIN OCR1B_pin
+  #define MODULATION_PIN 4
+#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
+  #define CARRIER_PIN OCR2B_pin
+  #define MODULATION_PIN OCR1A_pin
+#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
+  #define CARRIER_PIN OCR1A_pin
+  #define MODULATION_PIN OCR3A_pin
+#endif
 
 #ifndef TimeDateTools_h
   //		      									               Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec
@@ -103,10 +134,10 @@ License: MIT license (see LICENSE file).
 
 static volatile uint8_t WWVB_JJY_TIMECODE_INDEX = 0;
 static volatile uint32_t WWVB_PWM_ISR_COUNT = 0;
-static uint32_t WWVB_CARRIER_HZ = 0;
-static volatile bool WWVB_PWM_IS_TOGGLED = false;
+static uint32_t CARRIER_FREQ_HZ = 0;
+static volatile bool WWVB_JJY_PWM_IS_TOGGLED = false;
 static volatile uint16_t WWVB_PWM_PW = 0;
-static uint16_t WWVB_PERIOD = 0;
+static uint16_t period_register = 0;
 
 bool parity_8b(const uint8_t in, const bool isEven = true)
 {
@@ -165,7 +196,8 @@ void print_bcd(const uint16_t in, const uint8_t num_bits = 16, const bool dec_in
 class TimeCode
 {
  public:
-  uint32_t pulse_width[3];
+  uint16_t pulse_width[3];
+  
   wwvb_jjy_timecode frame;
   
   TimeCode() : output_offset(0) { clear_timecode(); }
@@ -191,8 +223,23 @@ class TimeCode
   void set_timecode();
   
   void print_timecode();
+  void print_timecode_serial();
   
+#if defined(WWVB_JJY_MILLIS_ISR)
+  void wwvb_jjy_millis_ISR();
+#endif
+
  private:
+ volatile bool output_state = !WWVB_TIMECODE;
+ 
+#if defined(WWVB_JJY_MILLIS_ISR)
+  uint32_t t0;
+  #if WWVB_TIMECODE
+  const uint16_t pulse_width_ms[3] = {200, 500, 800};
+  #else
+  const uint16_t pulse_width_ms[3] = {800, 500, 200};
+  #endif
+#endif
   time_t t_output;
   int32_t output_offset;
     
@@ -203,77 +250,171 @@ class TimeCode
 
 TimeCode wwvb_jjy;
 
-static void WWVB_ISR()
+static void wwvb_jjy_compare_ISR()
 {
-#ifdef WWVB_JJY_PAM
-  if (WWVB_JJY_TIMECODE_INDEX == 0)
-  {
-    wwvb_jjy.set_timecode(); // sync the timecode to the current time
-  }
-  
-  const uint8_t chip = wwvb_jjy.get_timecode(WWVB_JJY_TIMECODE_INDEX++);
-
-  if (WWVB_JJY_TIMECODE_INDEX > 59)
-  {
-    WWVB_JJY_TIMECODE_INDEX = 0;
-  }
-
-  // set the pulse width register
-  #if defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-  OCR1A = wwvb_jjy.pulse_width[chip];
-  #elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-  OCR3A = wwvb_jjy.pulse_width[chip];
-  #endif
-  
-#else //PWM
-  if (WWVB_PWM_ISR_COUNT >= (WWVB_CARRIER_HZ - 1)) // 1s elapsed
-  {
-    WWVB_PWM_ISR_COUNT= 0;
+    output_state = WWVB_TIMECODE;
     
-    if (WWVB_JJY_TIMECODE_INDEX == 0)
-    {
-      wwvb_jjy.set_timecode(); // sync the timecode to the current time
-    }
-  }
-  
-  if (WWVB_PWM_ISR_COUNT == 0) // start of the frame
-  {
-    const uint8_t chip = wwvb_jjy.get_timecode(WWVB_JJY_TIMECODE_INDEX++);
+    #if (WWVB_JJY_PULSE_LED)
+    digitalWrite(LED_BUILTIN, output_state);
+    #endif
     
-    if (WWVB_JJY_TIMECODE_INDEX > 59)
+    #ifdef WWVB_JJY_PWM
+    // set the pulse width register of the carrier
+    #if defined(__AVR_ATtinyX5__)
+    OCR1B = output_state*period_register/2;
+    #elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
+    OCR2B = output_state*period_register/2;
+    #elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
+    OCR1A = output_state*period_register/2;
+    #endif
+    #endif
+}
+
+static void wwvb_jjy_overflow_ISR()
+{
+    output_state = !WWVB_TIMECODE;
+    
+    const uint8_t chip = wwvb_jjy.get_timecode(WWVB_JJY_TIMECODE_INDEX);
+            
+    // increment the TIMECODE index
+    if (++WWVB_JJY_TIMECODE_INDEX > 59)
     {
       WWVB_JJY_TIMECODE_INDEX = 0;
+      
+      wwvb_jjy.set_timecode(); // sync the timecode to the current time
     }
     
-    WWVB_PWM_PW = wwvb_jjy.pulse_width[chip];
-    
-    WWVB_PWM_IS_TOGGLED = false;
-    WWVB_PWM_ISR_COUNT = 0;
-    
-    // set the pulse width register of the carrier
-    #if defined(__AVR_ATtinyX5__)
-      OCR1B = (!WWVB_TIMECODE)*WWVB_PERIOD/2;
-    #elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-      OCR2B = (!WWVB_TIMECODE)*WWVB_PERIOD/2;
-    #elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-      OCR1A = (!WWVB_TIMECODE)*WWVB_PERIOD/2;
+    #if (WWVB_JJY_PULSE_LED)
+    digitalWrite(LED_BUILTIN, output_state);
     #endif
-  }
-  else if ((WWVB_PWM_IS_TOGGLED == false) && (WWVB_PWM_ISR_COUNT >= (WWVB_PWM_PW -1))) // pulse width elapsed
-  {
-    WWVB_PWM_IS_TOGGLED = true;
+    
+    // set the pulse width register
+    #ifndef WWVB_JJY_MILLIS_ISR
+    #if defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
+    OCR1A = wwvb_jjy.pulse_width[chip];
+    #elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
+    OCR3A = wwvb_jjy.pulse_width[chip];
+    #endif
+    #endif
     
     // set the pulse width register of the carrier
+    #ifdef WWVB_JJY_PWM
     #if defined(__AVR_ATtinyX5__)
-      OCR1B = WWVB_TIMECODE*WWVB_PERIOD/2;
+    OCR1B = output_state*period_register/2;
     #elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-      OCR2B = WWVB_TIMECODE*WWVB_PERIOD/2;
+    OCR2B = output_state*period_register/2;
     #elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-      OCR1A = WWVB_TIMECODE*WWVB_PERIOD/2;
+    OCR1A = output_state*period_register/2;
+    #endif
     #endif    
-  }
+}
+
+#ifdef WWVB_JJY_MILLIS_ISR
+void TimeCode::wwvb_jjy_millis_ISR()
+{
+  uint32_t t = millis();
+  uint32_t duration_ms = t - t0;
   
-  ++WWVB_PWM_ISR_COUNT;
+  if (duration_ms > 1000)
+  {
+    wwvb_jjy_overflow_ISR()
+    
+    wwvb_jjy.t0 = t;
+  }
+  else if ((duration_ms >= wwvb_jjy.pulse_width_ms[chip]) & (output_state != WWVB_TIMECODE))
+  {
+    wwvb_jjy_compare_ISR();
+  }
+}
+#endif
+
+void TimeCode::init(const uint32_t carrier_Hz)
+{
+  #if (WWVB_JJY_PULSE_LED)
+  pinMode(LED_BUILTIN, OUTPUT);
+  #endif
+  pinMode(CARRIER_PIN, OUTPUT); // carrier pin
+  pinMode(MODULATION_PIN, OUTPUT); // modulation pin
+  
+  WWVB_JJY_TIMECODE_INDEX = 0;
+  CARRIER_FREQ_HZ = carrier_Hz;
+
+#if defined(__AVR_ATtinyX5__)
+  // ignore PAM at this stage
+  pwm.set(1, 'b', CARRIER_FREQ_HZ, 2, 0); // carrier
+
+  period_register = pwm.get_register(1, 'o');
+#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
+  pwm.set(2, 'b', CARRIER_FREQ_HZ, 2, 0); // carrier
+  pwm.set(1, 'a', 1, 2, WWVB_TIMECODE); // modulation
+
+  pwm.attachInterrupt(1, 'o', wwvb_jjy_overflow_ISR);
+  period_register = pwm.get_register(2, 'o');
+#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
+  pwm.set(1, 'a', CARRIER_FREQ_HZ, 2, 0); // carrier
+  pwm.set(3, 'a', 1, 2, WWVB_TIMECODE); // modulation
+
+  pwm.attachInterrupt(3, 'o', wwvb_jjy_overflow_ISR);
+  period_register = pwm.get_register(1, 'o');
+#endif
+  
+  // set reference pulse widths
+  // WWVB (JJY is inverted)
+  // LOW :   Low for 0.2s / 1.0s (20% low duty cycle)
+	// HIGH:   Low for 0.5s / 1.0s
+	// MARKER: Low for 0.8s / 1.0s
+
+#if (WWVB_TIMECODE==1)
+  // WWVB
+  //   TIME 0.0 .1 .2 .3 .4 .5 .6 .7 .8 .9 1.0s
+  // [       |     |________|________|______| ]
+  // [ LOW   :____/          _______________\ ]
+  // [ HIGH  :______________/         ______\ ]
+  // [ MARKER:_______________________/      \ ]
+  pulse_width[0] = period_register/5; // 0.2s
+  pulse_width[1] = period_register/2; // 0.5s
+  pulse_width[2] = period_register*4/5; // 0.8s
+#else
+  // JJY
+  //   TIME 0.0 .1 .2 .3 .4 .5 .6 .7 .8 .9 1.0s
+  // [       |_____|________|________|      | ]
+  // [ LOW   :______________         \______/ ]
+  // [ HIGH  :_____         \_______________/ ]
+  // [ MARKER:     \________________________/ ]
+  pulse_width[0] = WWVB_CARRIER_HZ*4/5; // 0.8s
+  pulse_width[1] = WWVB_CARRIER_HZ/2; // 0.5s
+  pulse_width[2] = WWVB_CARRIER_HZ/5; // 0.2s
+#endif
+
+  
+}
+
+void TimeCode::start()
+{
+  wwvb_jjy.set_timecode(); // sync the timecode to the current time
+  
+#if defined(__AVR_ATtinyX5__)
+  pwm.start(1);
+  t0 = millis();
+#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
+  pwm.start(1);
+  pwm.start(2);
+#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
+  pwm.start(3);
+  pwm.start(1);
+#endif
+}
+
+void TimeCode::stop()
+{
+#if defined(__AVR_ATtinyX5__)
+  pwm.stop(1);
+#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
+  pwm.stop(1);
+  pwm.stop(2);
+#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
+  pwm.stop(3);
+  pwm.stop(1);
 #endif
 }
 
@@ -311,140 +452,53 @@ void TimeCode::print_timecode()
 		}
 }
 
-void TimeCode::init(const uint32_t carrier_Hz)
+// print_timecode_serial()
+// output string is in the same format as : http://www.leapsecond.com/notes/wwvb2.htm
+void TimeCode::print_timecode_serial()
 {
-  WWVB_JJY_TIMECODE_INDEX = 0;
-  WWVB_CARRIER_HZ = carrier_Hz;
-  //                 +--------+
-  //                 | millis |
-  //+------------+---+--------+--------+--------+--------+--------+
-  //| Chip       |   | Timer0 | Timer1 | Timer2 | Timer3 | Timer4 |
-  //+------------+---+--------+--------+--------+--------+--------+
-  //| ATtiny85   | A |   D0   |   D1   |   --   |   --   |   --   |
-  //|            | B |   D1   | C=D3   |   --   |   --   |   --   |
-  //+------------+---+--------+--------+--------+--------+--------+
-  //| ATmega328p | A |   D6   | M=D9   |  D12   |   --   |   --   |
-  //|            | B |   D5   |  D10   | C=D3   |   --   |   --   |
-  //+------------+---+--------+--------+--------+--------+--------+
-  //| ATmega32u4 | A |  D11   | C=D9   |   --   | M=D5   |  D13   |
-  //+------------+---+--------+--------+--------+--------+--------+
-  // C = carrier pin
-  // M = modulation pin
-
-#if defined(__AVR_ATtinyX5__)
-  // ignore PAM at this stage
-  pwm.set(1, 'b', WWVB_CARRIER_HZ, 2, 0); // carrier
-  pwm.attachInterrupt(1, WWVB_ISR);
-  WWVB_PERIOD = pwm.getPeriodRegister(1);
-#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-  pwm.set(2, 'b', WWVB_CARRIER_HZ, 2, 0); // carrier
+  const uint8_t hour_ = BCD_to_uint8(frame.timecode.hours,1);
+  const uint8_t minute_ = BCD_to_uint8(frame.timecode.minutes,1);
+  const uint16_t doty_ = BCD_to_uint16(frame.timecode.doty,1);
   
-  #ifdef WWVB_JJY_PAM
-  pwm.set(1, 'a', 1, 2, WWVB_TIMECODE); // modulation
-  pwm.attachInterrupt(1, WWVB_ISR);
-  WWVB_PERIOD = pwm.getPeriodRegister(1);
-  #else
-  pwm.attachInterrupt(2, WWVB_ISR);
-  WWVB_PERIOD = pwm.getPeriodRegister(2);
-  #endif
-#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-  pwm.set(1, 'a', WWVB_CARRIER_HZ, 2, 0); // carrier
-
-  #ifdef WWVB_JJY_PAM
-  pwm.set(3, 'a', 1, 2, WWVB_TIMECODE); // modulation
-  pwm.attachInterrupt(3, WWVB_ISR);
-  WWVB_PERIOD = pwm.getPeriodRegister(3);
-  #else
-  pwm.attachInterrupt(1, WWVB_ISR);
-  WWVB_PERIOD = pwm.getPeriodRegister(1);
-  #endif
-#endif
-  
-  // set reference pulse widths
-  // WWVB (JJY is inverted)
-  // LOW :   Low for 0.2s / 1.0s (20% low duty cycle)
-	// HIGH:   Low for 0.5s / 1.0s
-	// MARKER: Low for 0.8s / 1.0s
-  
-
 #if (WWVB_TIMECODE==1)
-  // WWVB
-  //   TIME 0.0 .1 .2 .3 .4 .5 .6 .7 .8 .9 1.0s
-  // [       |     |________|________|______| ]
-  // [ LOW   :____/          _______________\ ]
-  // [ HIGH  :______________/         ______\ ]
-  // [ MARKER:_______________________/      \ ]
-  #ifdef WWVB_JJY_PAM
-  pulse_width[0] = WWVB_PERIOD/5; // 0.2s
-  pulse_width[1] = WWVB_PERIOD/2; // 0.5s
-  pulse_width[2] = WWVB_PERIOD*4/5; // 0.8s
-  #else
-  pulse_width[0] = WWVB_CARRIER_HZ/5; // 0.2s
-  pulse_width[1] = WWVB_CARRIER_HZ/2; // 0.5s
-  pulse_width[2] = WWVB_CARRIER_HZ*4/5; // 0.8s
-  #endif
-
+  uint16_t year_ = BCD_to_uint16(frame.timecode.year,1);
 #else
-  // JJY
-  //   TIME 0.0 .1 .2 .3 .4 .5 .6 .7 .8 .9 1.0s
-  // [       |_____|________|________|      | ]
-  // [ LOW   :______________         \______/ ]
-  // [ HIGH  :_____         \_______________/ ]
-  // [ MARKER:     \________________________/ ]
-  #ifdef WWVB_JJY_PAM
-  pulse_width[0] = WWVB_PERIOD*4/5; // 0.8s
-  pulse_width[1] = WWVB_PERIOD/2; // 0.5s
-  pulse_width[2] = WWVB_PERIOD/5; // 0.2s
-  #else
-  pulse_width[0] = WWVB_CARRIER_HZ*4/5; // 0.8s
-  pulse_width[1] = WWVB_CARRIER_HZ/2; // 0.5s
-  pulse_width[2] = WWVB_CARRIER_HZ/5; // 0.2s
-  #endif
-
+  uint16_t year_ = BCD_to_uint16(frame.timecode.year,0);
 #endif
 
-  // set the output pins
-#if defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-  pinMode(OCR2B_pin, OUTPUT); // carrier pin
-  pinMode(OCR1A_pin, OUTPUT); // modulation pin
-#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-  pinMode(OCR1A_pin, OUTPUT); // carrier pin
-  pinMode(OCR3A_pin, OUTPUT); // modulation pin
-#endif
-}
+  Serial.print("'");
+  if (year_ < 10) {Serial.print("0");}
+  Serial.print(year_);
+  Serial.print("+");
+  if (doty_ < 100) {Serial.print("0");}
+  if (doty_ < 10) {Serial.print("0");}
+  Serial.print(doty_);
+  Serial.print(" ");
+  if (hour_ < 10) {Serial.print("0");}
+  Serial.print(hour_);
+  Serial.print(":");
+  if (minute_ < 10) {Serial.print("0");}
+  Serial.print(minute_);
+  Serial.print("  ");
 
-void TimeCode::start()
-{
-#if defined(__AVR_ATtinyX5__)
-  pwm.start(1);
-#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-  #ifdef WWVB_JJY_PAM
-  pwm.start(1);
-  #endif
-  pwm.start(2);
-#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-  #ifdef WWVB_JJY_PAM
-  pwm.start(3);
-  #endif
-  pwm.start(1);
-#endif
-}
-
-void TimeCode::stop()
-{
-#if defined(__AVR_ATtinyX5__)
-  pwm.stop(1);
-#elif defined(__AVR_ATmega168__) | defined(__AVR_ATmega168P__) | defined(__AVR_ATmega328P__)
-  #ifdef WWVB_JJY_PAM
-  pwm.stop(1);
-  #endif
-  pwm.stop(2);
-#elif defined(__AVR_ATmega16U4__) | defined(__AVR_ATmega32U4__)
-  #ifdef WWVB_JJY_PAM
-  pwm.stop(3);
-  #endif
-  pwm.stop(1);
-#endif
+  for (uint8_t i = 0; i < 60; ++i)
+  {
+    switch (i)
+    {
+    // markers
+    case 0:  // start frame
+    case 9:  // end MINS
+    case 19: // end HOUR
+    case 29: // end DOTY
+    case 39: // end DUT1
+    case 49: // end YEAR
+    case 59: // end MISC, end frame
+      Serial.print(2); break;
+    default:
+      Serial.print(frame.buffer[i]);break;
+    }
+  }
+  Serial.print("\n");
 }
 
 uint8_t TimeCode::get_timecode(const uint8_t i)
