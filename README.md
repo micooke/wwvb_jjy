@@ -12,7 +12,7 @@ Works with 16MHz or 8MHz boards
 ## Requirements
 * [Time.h - standard Arduino library](http://www.arduino.cc/playground/Code/Time)
 * [PWM.h](https://github.com/micooke/PWM/PWM.h)
-* (optional) [Timezone.h](https://github.com/JChristensen/Timezone)
+* [Timezone.h](https://github.com/JChristensen/Timezone)
 
 ## Implementation notes
 Note: the following `#define`'s must come in your .ino file prior to including [wwvb_jjy.h] (https://github.com/micooke/wwvb_jjy/blob/master/wwvb_jjy.h)
