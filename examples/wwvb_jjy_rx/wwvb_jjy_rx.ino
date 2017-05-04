@@ -4,6 +4,9 @@
 #define WWVB_TIMECODE 1
 #endif
 
+#define DEFINE_TIMEDATETOOLS
+
+#include <TimeLib.h> //https://github.com/PaulStoffregen/Time
 #include <wwvb_jjy.h>
 
 uint8_t _idx = 0;
@@ -42,13 +45,16 @@ void loop()
   {
     if ((prev_time_code == 2) && (time_code == 2))
     {
-      wwvb_jjy.frame.buffer.clear();
+      wwvb_jjy.frame.buffer = 0;
       _idx = 0;
     }
     
-    wwvb_jjy.frame.buffer.set(_idx++, time_code);
+    if (time_code < 2)
+    {
+      wwvb_jjy.frame.buffer.set(_idx, time_code);
+    }
     
-    if (_idx == 60)
+    if (++_idx > 59)
     {
       print_time();
       wwvb_jjy.print_timecode();

@@ -85,7 +85,7 @@ struct timecode_frame{
 
 class bool_buffer_64b{
   public: 
-    uint8_t operator[](uint8_t i)
+    uint8_t operator[](const uint8_t i)
 		{
 			return (uint8_t)((_buffer >> (59 - i)) & 0x01);
 		}
@@ -94,6 +94,10 @@ class bool_buffer_64b{
 		{
 			_buffer = r;
 		}
+    void set(const uint8_t i, const uint8_t r)
+    {
+      _buffer |= (r << (59 - i));
+    }
   private:
     uint64_t _buffer;
 };

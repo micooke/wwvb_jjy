@@ -29,8 +29,22 @@ License: MIT license (see LICENSE file).
 #define WWVB_JJY_PULSE_LED 1
 #endif
 
+//#define DEFINE_TIMEDATETOOLS // used if you do not intend to include TimeDateTools
+
+#ifndef DEFINE_TIMEDATETOOLS
+  #ifdef REQUIRE_TIMEDATESTRING
+    #if (REQUIRE_TIMEDATESTRING == 0)
+    #undef REQUIRE_TIMEDATESTRING
+    #define REQUIRE_TIMEDATESTRING 1
+    #endif
+  #else
+    #define REQUIRE_TIMEDATESTRING 1
+  #endif
+#include <TimeDateTools.h>
+#endif
+
 #include "wwvb_jjy_structs.h"
-#include <Time.h>           //http://www.arduino.cc/playground/Code/Time
+#include <TimeLib.h>           //https://github.com/PaulStoffregen/Time
 #include <Timezone.h>       //https://github.com/JChristensen/Timezone
 #include <PWM.h>            //https://github.com/micooke/PWM
 
@@ -69,7 +83,7 @@ License: MIT license (see LICENSE file).
   #define MODULATION_PIN OCR3A_pin
 #endif
 
-#ifndef TimeDateTools_h
+#ifdef DEFINE_TIMEDATETOOLS
   //		      									               Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec
   const uint16_t cumulativeDIAM[12] PROGMEM = { 0 , 31, 59, 90,120,151,181,212,243,273,304,334 }; // cumulative
   #define cumulative_days_in_a_month(k) pgm_read_word_near(cumulativeDIAM + k)
@@ -175,7 +189,7 @@ uint16_t BCD_to_uint16(const uint16_t in, const bool dec_inc = 0)
 
 void print_bcd(const uint16_t in, const uint8_t num_bits = 16, const bool dec_inc = 0)
 {
-#if _DEBUG > 0
+#if (_DEBUG > 0)
   for (int8_t i=num_bits-1; i>=0; --i)
   {
     if ((((i+1) % 5) == 0) && (dec_inc == 1))
@@ -196,16 +210,21 @@ class TimeCode
   uint16_t pulse_width[3];
   volatile uint8_t WWVB_JJY_TIMECODE_INDEX = 0;
   volatile bool timecode_isnew;
-  
+  bool is_active_ = false;
   uint32_t CARRIER_FREQ_HZ = 0;
   
   wwvb_jjy_timecode frame;
     
   TimeCode() : output_offset(0) { clear_timecode(); }
-  
+  #if WWVB_TIMECODE
   void init(const uint32_t carrier_Hz = 60000);
+  #else
+  void init(const uint32_t carrier_Hz = 40000);
+  #endif
   void start();
   void stop();
+
+  bool is_active() { return is_active_; }
   
   void set_time(char dateString[], char timeString[]);
   void set_time(uint8_t _hour, uint8_t _minute, uint8_t _second, uint8_t _day, uint8_t _month, uint8_t _year);
@@ -213,6 +232,7 @@ class TimeCode
   void set_timezone(TimeChangeRule DST_, TimeChangeRule STD_);
   
   void set_time_offset(int32_t _Seconds = 0);
+  void set_time_offset(int8_t hours = 0, int8_t mins = 0);
   
   time_t get_output_time();
   time_t get_local_time();
@@ -244,7 +264,6 @@ class TimeCode
     
   TimeChangeRule DST = {"ACDT", First, Sun, Oct, 2, 10*60+30};    //Daylight time = UTC +10:30
   TimeChangeRule STD = {"ACST", First, Sun, Apr, 3, 9*60+30};     //Standard time = UTC +9:30
-  TimeChangeRule *tcr;  
 };
 
 TimeCode wwvb_jjy;
@@ -437,6 +456,7 @@ void TimeCode::start()
   pwm.start(3);
   pwm.start(1);
 #endif
+  is_active_ = true;
 }
 
 void TimeCode::stop()
@@ -450,46 +470,50 @@ void TimeCode::stop()
   pwm.stop(3);
   pwm.stop(1);
 #endif
+  is_active_ = false;
 }
 
 void TimeCode::print_timecode()
 {
+#if (_DEBUG > 1)
   for (uint8_t i = 0; i < 60; ++i)
+	{
+		switch (i)
 		{
-			switch (i)
-			{
-				// markers
-			case 0:  // start frame
-				Serial.println(F("INDX: [0 1 2 3 4 5 6 7 8 9]"));
-				Serial.print(F("MINS: [M ")); break;
-			case 9:  // end MINS
-				Serial.print(F("M]\n"));
-				Serial.print(F("HOUR: [")); break;
-			case 19: // end HOUR
-				Serial.print(F("M]\n"));
-				Serial.print(F("DOTY: [")); break;
-			case 29: // end DOTY
-				Serial.print(F("M]\n"));
-				Serial.print(F("DUT1: [")); break;
-			case 39: // end DUT1
-				Serial.print(F("M]\n"));
-				Serial.print(F("YEAR: [")); break;
-			case 49: // end YEAR
-				Serial.print(F("M]\n"));
-				Serial.print(F("MISC: [")); break;
-			case 59: // end MISC, end frame
-				Serial.print(F("M]\n")); break;
-			default:
-				Serial.print(frame.buffer[i]);
-				Serial.print(' '); break;
-			}
+			// markers
+		case 0:  // start frame
+			Serial.println(F("INDX: [0 1 2 3 4 5 6 7 8 9]"));
+			Serial.print(F("MINS: [M ")); break;
+		case 9:  // end MINS
+			Serial.print(F("M]\n"));
+			Serial.print(F("HOUR: [")); break;
+		case 19: // end HOUR
+			Serial.print(F("M]\n"));
+			Serial.print(F("DOTY: [")); break;
+		case 29: // end DOTY
+			Serial.print(F("M]\n"));
+			Serial.print(F("DUT1: [")); break;
+		case 39: // end DUT1
+			Serial.print(F("M]\n"));
+			Serial.print(F("YEAR: [")); break;
+		case 49: // end YEAR
+			Serial.print(F("M]\n"));
+			Serial.print(F("MISC: [")); break;
+		case 59: // end MISC, end frame
+			Serial.print(F("M]\n")); break;
+		default:
+			Serial.print(frame.buffer[i]);
+			Serial.print(' '); break;
 		}
+	}
+#endif
 }
 
 // print_timecode_serial()
 // output string is in the same format as : http://www.leapsecond.com/notes/wwvb2.htm
 void TimeCode::print_timecode_serial()
 {
+#if (_DEBUG > 0)
   const uint8_t hour_ = BCD_to_uint8(frame.timecode.hours,1);
   const uint8_t minute_ = BCD_to_uint8(frame.timecode.minutes,1);
   const uint16_t doty_ = BCD_to_uint16(frame.timecode.doty,1);
@@ -533,6 +557,7 @@ void TimeCode::print_timecode_serial()
     }
   }
   Serial.print("\n");
+#endif
 }
 
 uint8_t TimeCode::get_timecode(const uint8_t i)
@@ -560,6 +585,11 @@ time_t TimeCode::get_output_time()
 time_t TimeCode::get_local_time()
 {
   return (time_t)(t_output - output_offset);
+}
+
+void TimeCode::set_time_offset(int8_t hours, int8_t mins)
+{
+  output_offset = hours*3600 + mins*60;
 }
 
 void TimeCode::set_time_offset(int32_t _Seconds)

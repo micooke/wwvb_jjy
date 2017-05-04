@@ -19,6 +19,9 @@
 
 //#define WWVB_JJY_MILLIS_ISR
 
+#define DEFINE_TIMEDATETOOLS
+
+#include <TimeLib.h> //https://github.com/PaulStoffregen/Time
 #include <wwvb_jjy.h>
 
 void setup()
