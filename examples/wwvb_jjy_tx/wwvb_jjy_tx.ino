@@ -11,9 +11,9 @@
 // C = carrier pin
 // M = modulation pin
   
-#define _DEBUG 1
+//#define _DEBUG 1
 
-//#define WWVB_TIMECODE 0 // JJY
+#define WWVB_TIMECODE 0 // JJY
 
 //#define WWVB_JJY_PAM
 
@@ -34,7 +34,7 @@ void setup()
   //wwvb_jjy.set_time(__DATE__, __TIME__);
   wwvb_jjy.set_time(8, 43, 00, 7, 2, 05);
   
-  wwvb_jjy.init(); // default : (isJJY, carrier_Hz) = (false, 60000) - wwvb @ 60kHz
+  wwvb_jjy.init(); // default : (carrier_Hz) = (40000) - jjy @ 40kHz
   
   //wait for a minute to start
   //while(second() > 0);
